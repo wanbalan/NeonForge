@@ -27,7 +27,7 @@ mod vga;
 use core::mem::MaybeUninit;
 use linked_list_allocator::LockedHeap;
 
-use crate::eng::SCANCODE_MAP;
+use crate::eng::{SCANCODE_MAP, SCANCODE_SHIFT_MAP};
 use constants::{
     COLOR_INFO, COLS, CURRENT_COL, CURRENT_ROW, HEAP_SIZE, MAX_LINES, MSG, PARTITION_OFFSET, ROWS,
 };
@@ -41,6 +41,8 @@ use embedded_sdmmc::{Controller, Mode, VolumeIdx};
 
 use gpio::Gpio;
 use vga::{write_char, write_string};
+
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
@@ -82,6 +84,22 @@ static mut BUFFER: [[u8; COLS]; ROWS] = [[0; COLS]; ROWS];
 static mut CURSOR_POSITION_ROW: usize = 0;
 static mut CURSOR_POSITION_COL: usize = 0;
 static mut INPUT_BUFFER: String = String::new();
+
+//static mut SHIFT_PRESSED: bool = false;
+
+static mut KEY_PRESSED: [bool; 256] = [false; 256];
+
+// Управление состоянием клавиш
+static LAST_KEYCODE: AtomicU8 = AtomicU8::new(0);
+static LAST_REPEAT_TICK: AtomicU64 = AtomicU64::new(0);
+static SHIFT_PRESSED: AtomicBool = AtomicBool::new(false);
+static TICKS: AtomicU64 = AtomicU64::new(0);
+
+// Массив удержания для всех клавиш
+static KEY_HELD: [AtomicBool; 256] = {
+    const FALSE: AtomicBool = AtomicBool::new(false);
+    [FALSE; 256]
+};
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
@@ -169,9 +187,10 @@ pub extern "C" fn _start() -> ! {
             scroll_status();
             date_status();
             time_status();
-            if let Some(key) = get_key() {
-                print_key(key, screen_width, screen_height);
-            }
+            get_key();
+            //if let Some(key) = get_key() {
+            //    print_key(key, screen_width, screen_height);
+            //}
         }
     }
 }
@@ -269,16 +288,34 @@ fn get_key() -> Option<u8> {
     let mut port = Port::new(0x60);
     let scancode: u8 = unsafe { port.read() };
 
-    static mut LAST_SCANCODE: u8 = 0;
     unsafe {
-        if scancode == 0x0E {
-            delay(200000);
-            Some(scancode)
-        } else if scancode != LAST_SCANCODE {
-            LAST_SCANCODE = scancode;
-            Some(scancode)
+        if scancode == 0x2A || scancode == 0x36 {
+            SHIFT_PRESSED.store(true, Ordering::Relaxed);
+            return None;
+        }
+        if scancode == 0xAA || scancode == 0xB6 {
+            SHIFT_PRESSED.store(false, Ordering::Relaxed);
+            return None;
+        }
+
+        let is_release = (scancode & 0x80) != 0;
+        let keycode = scancode & 0x7F;
+
+        if is_release {
+            KEY_HELD[keycode as usize].store(false, Ordering::Relaxed);
+            if LAST_KEYCODE.load(Ordering::Relaxed) == keycode {
+                LAST_KEYCODE.store(0, Ordering::Relaxed);
+            }
+            return None;
         } else {
-            None
+            if !KEY_HELD[keycode as usize].load(Ordering::Relaxed) {
+                KEY_HELD[keycode as usize].store(true, Ordering::Relaxed);
+                LAST_KEYCODE.store(keycode, Ordering::Relaxed);
+                LAST_REPEAT_TICK.store(TICKS.load(Ordering::Relaxed), Ordering::Relaxed);
+                // НЕ ВЫЗЫВАТЬ print_key здесь
+                return None;
+            }
+            return None;
         }
     }
 }
@@ -293,34 +330,47 @@ fn print_key(key: u8, width: u16, height: u16) {
                 BUFFER[CURRENT_ROW][CURRENT_COL] = 0;
                 INPUT_BUFFER.pop();
             }
-        } else if let Some(character) = SCANCODE_MAP[key as usize] {
-            if character == '\n' {
-                // Выполнение команды и отображение текущей строки
-                let stat: bool = commands::command_fn(&raw mut BUFFER, CURRENT_ROW, &INPUT_BUFFER);
-                if !stat {
-                    CURRENT_ROW += 2;
-                }
+        } else {
+            // Выбираем правильный символ с учётом Shift
+            let shift_pressed = SHIFT_PRESSED.load(Ordering::Relaxed);
 
-                // Очистка буфера после выполнения команды
-                INPUT_BUFFER.clear();
-
-                CURRENT_COL = 0;
-                if CURRENT_ROW >= 24 {
-                    scroll();
-                    CURRENT_ROW -= 1;
-                    CURRENT_COL = 0;
-                }
-                // Печать приглашения
-                CURRENT_COL = print_prompt(CURRENT_ROW, CURRENT_COL);
+            let character = if shift_pressed {
+                SCANCODE_SHIFT_MAP[key as usize]
             } else {
-                if CURRENT_COL < COLS {
-                    if CURRENT_COL > 78 {
-                        CURRENT_COL = 0;
-                        CURRENT_ROW += 1;
+                SCANCODE_MAP[key as usize]
+            };
+
+            if let Some(character) = character {
+                if character == '\n' {
+                    // Выполнение команды и отображение текущей строки
+                    let stat: bool =
+                        commands::command_fn(&raw mut BUFFER, CURRENT_ROW, &INPUT_BUFFER);
+                    if !stat {
+                        CURRENT_ROW += 2;
                     }
-                    BUFFER[CURRENT_ROW][CURRENT_COL] = character as u8;
-                    INPUT_BUFFER.push(character);
-                    CURRENT_COL += 1;
+
+                    // Очистка буфера после выполнения команды
+                    INPUT_BUFFER.clear();
+
+                    CURRENT_COL = 0;
+                    if CURRENT_ROW >= 24 {
+                        scroll();
+                        CURRENT_ROW -= 1;
+                        CURRENT_COL = 0;
+                    }
+                    // Печать приглашения
+                    CURRENT_COL = print_prompt(CURRENT_ROW, CURRENT_COL);
+                } else {
+                    if CURRENT_COL < COLS {
+                        if CURRENT_COL > 78 {
+                            CURRENT_COL = 0;
+                            CURRENT_ROW += 1;
+                        }
+
+                        BUFFER[CURRENT_ROW][CURRENT_COL] = character as u8;
+                        INPUT_BUFFER.push(character);
+                        CURRENT_COL += 1;
+                    }
                 }
             }
         }

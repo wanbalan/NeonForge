@@ -4,6 +4,8 @@ use core::sync::atomic::Ordering;
 use x86_64::instructions::port::Port;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
+use crate::{print_key, KEY_HELD, LAST_KEYCODE, LAST_REPEAT_TICK};
+
 static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
 static PICS: spin::Mutex<ChainedPics> =
     spin::Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
@@ -26,11 +28,18 @@ impl InterruptIndex {
 }
 
 extern "x86-interrupt" fn pit_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    let ticks = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    let key = LAST_KEYCODE.load(Ordering::Relaxed);
 
-    if TICKS.load(Ordering::Relaxed) % 1000 == 0 {
-        let mut time = CURRENT_TIME.lock();
-        time.update();
+    if key != 0 && KEY_HELD[key as usize].load(Ordering::Relaxed) {
+        let last_tick = LAST_REPEAT_TICK.load(Ordering::Relaxed);
+
+        if ticks.wrapping_sub(last_tick.try_into().unwrap()) >= 200 {
+            // 200 тиков = задержка между повторениями
+            LAST_REPEAT_TICK.store(ticks as u64, Ordering::Relaxed);
+
+            print_key(key, 80, 25);
+        }
     }
 
     unsafe {
