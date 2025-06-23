@@ -34,11 +34,11 @@ extern "x86-interrupt" fn pit_interrupt_handler(_stack_frame: InterruptStackFram
     if key != 0 && KEY_HELD[key as usize].load(Ordering::Relaxed) {
         let last_tick = LAST_REPEAT_TICK.load(Ordering::Relaxed);
 
-        if ticks.wrapping_sub(last_tick.try_into().unwrap()) >= 200 {
-            // 200 тиков = задержка между повторениями
-            LAST_REPEAT_TICK.store(ticks as u64, Ordering::Relaxed);
-
-            print_key(key, 80, 25);
+        if let Ok(last_tick_u) = last_tick.try_into() {
+            if ticks.wrapping_sub(last_tick_u) >= 200 {
+                LAST_REPEAT_TICK.store(ticks as u64, Ordering::Relaxed);
+                print_key(key, 80, 25);
+            }
         }
     }
 
