@@ -6,6 +6,8 @@ use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
 use crate::{print_key, KEY_HELD, LAST_KEYCODE, LAST_REPEAT_TICK};
 
+use crate::syscalls::syscall_entry;
+
 static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
 static PICS: spin::Mutex<ChainedPics> =
     spin::Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
@@ -29,6 +31,12 @@ impl InterruptIndex {
 
 extern "x86-interrupt" fn pit_interrupt_handler(_stack_frame: InterruptStackFrame) {
     let ticks = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+
+    if TICKS.load(Ordering::Relaxed) % 1000 == 0 {
+        let mut time = CURRENT_TIME.lock();
+        time.update();
+    }
+
     let key = LAST_KEYCODE.load(Ordering::Relaxed);
 
     if key != 0 && KEY_HELD[key as usize].load(Ordering::Relaxed) {
@@ -64,6 +72,9 @@ pub fn init_idt() {
     unsafe {
         IDT[InterruptIndex::Timer.as_usize()].set_handler_fn(pit_interrupt_handler);
         IDT[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
+
+        IDT[0x80].set_handler_addr(x86_64::VirtAddr::new(syscall_entry as u64));
+
         let idt = &raw mut IDT;
         idt.as_ref().expect("IDT is None").load();
         PICS.lock().initialize();
@@ -73,3 +84,4 @@ pub fn init_idt() {
 pub fn enable_interrupts() {
     x86_64::instructions::interrupts::enable();
 }
+

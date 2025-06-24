@@ -44,8 +44,13 @@ use vga::{write_char, write_string};
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
+mod syscalls;
+
+mod sys;
+use sys::sys_print_char;
+
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 fn init_heap() {
     static mut HEAP_MEMORY: MaybeUninit<[u8; HEAP_SIZE]> = MaybeUninit::uninit();
@@ -158,8 +163,6 @@ pub extern "C" fn _start() -> ! {
     //     }
     // }
 
-    // delay(100000000);
-
     unsafe {
         let screen_width = 80;
         let screen_height = 25;
@@ -183,6 +186,9 @@ pub extern "C" fn _start() -> ! {
         *vga_buffer.offset((cursor_row as isize * COLS as isize + cursor_col as isize) * 2 + 1) =
             0x07;
 
+        // sys_print_char(10, 5, b'H', 0x07);
+        // delay(100000000);
+
         loop {
             scroll_status();
             date_status();
@@ -191,6 +197,7 @@ pub extern "C" fn _start() -> ! {
             //if let Some(key) = get_key() {
             //    print_key(key, screen_width, screen_height);
             //}
+            x86_64::instructions::hlt();
         }
     }
 }
