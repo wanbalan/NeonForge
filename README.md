@@ -39,27 +39,6 @@ install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-install nightly rust
-```
-rustup toolchain install nightly-2024-11-08
-
-rustup default nightly-2024-11-08
-
-rustup update nightly
-```
-
-```
-rustup component add llvm-tools-preview
-```
-
-```
-rustc --version
-```
-
-```
-rustup component add rust-src
-```
-
 install bootimage
 ```
 cargo install bootimage
